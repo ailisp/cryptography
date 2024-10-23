@@ -126,7 +126,7 @@ mod _rust {
         };
         #[pymodule_export]
         use crate::x509::csr::{
-            create_x509_csr, load_der_x509_csr, load_pem_x509_csr, CertificateSigningRequest,
+            create_x509_csr_raw, sign_x509_csr_raw, pack_x509, create_x509_csr, load_der_x509_csr, load_pem_x509_csr, CertificateSigningRequest,
         };
         #[pymodule_export]
         use crate::x509::sct::Sct;

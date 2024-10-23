@@ -286,6 +286,154 @@ pub(crate) fn load_der_x509_csr(
 }
 
 #[pyo3::pyfunction]
+pub(crate) fn create_x509_csr_raw(
+    py: pyo3::Python<'_>,
+    builder: &pyo3::Bound<'_, pyo3::PyAny>,
+    public_key: &pyo3::Bound<'_, pyo3::PyAny>,
+) -> CryptographyResult<pyo3::Py<pyo3::types::PyBytes>> {
+    let der = types::ENCODING_DER.get(py)?;
+    let spki = types::PUBLIC_FORMAT_SUBJECT_PUBLIC_KEY_INFO.get(py)?;
+    let spki_bytes = public_key
+        .call_method1(pyo3::intern!(py, "public_bytes"), (der, spki))?
+        .extract::<pyo3::pybacked::PyBackedBytes>()?;
+
+    let ka_vec = cryptography_keepalive::KeepAlive::new();
+    let ka_bytes = cryptography_keepalive::KeepAlive::new();
+
+    let mut attrs = vec![];
+    let ext_bytes;
+    if let Some(exts) = x509::common::encode_extensions(
+        py,
+        &ka_vec,
+        &ka_bytes,
+        &builder.getattr(pyo3::intern!(py, "_extensions"))?,
+        x509::extensions::encode_extension,
+    )? {
+        ext_bytes = asn1::write_single(&exts)?;
+        attrs.push(Attribute {
+            type_id: (oid::EXTENSION_REQUEST).clone(),
+            values: common::Asn1ReadableOrWritable::new_write(asn1::SetOfWriter::new([
+                asn1::parse_single(&ext_bytes)?,
+            ])),
+        });
+    }
+
+    let mut attr_values = vec![];
+    for py_attr in builder.getattr(pyo3::intern!(py, "_attributes"))?.iter()? {
+        let (py_oid, value, tag): (
+            pyo3::Bound<'_, pyo3::PyAny>,
+            pyo3::pybacked::PyBackedBytes,
+            Option<u8>,
+        ) = py_attr?.extract()?;
+        let oid = py_oid_to_oid(py_oid)?;
+        let tag = if let Some(tag) = tag {
+            asn1::Tag::from_bytes(&[tag])?.0
+        } else {
+            if std::str::from_utf8(&value).is_err() {
+                return Err(CryptographyError::from(
+                    pyo3::exceptions::PyValueError::new_err(
+                        "Attribute values must be valid utf-8.",
+                    ),
+                ));
+            }
+            asn1::Utf8String::TAG
+        };
+
+        attr_values.push((oid, tag, value));
+    }
+
+    for (oid, tag, value) in &attr_values {
+        attrs.push(Attribute {
+            type_id: oid.clone(),
+            values: common::Asn1ReadableOrWritable::new_write(asn1::SetOfWriter::new([
+                common::RawTlv::new(*tag, value),
+            ])),
+        });
+    }
+
+    let py_subject_name = builder.getattr(pyo3::intern!(py, "_subject_name"))?;
+
+    let ka = cryptography_keepalive::KeepAlive::new();
+
+    let csr_info = CertificationRequestInfo {
+        version: 0,
+        subject: x509::common::encode_name(py, &ka, &py_subject_name)?,
+        spki: asn1::parse_single(&spki_bytes)?,
+        attributes: common::Asn1ReadableOrWritable::new_write(asn1::SetOfWriter::new(attrs)),
+    };
+
+    let tbs_bytes = asn1::write_single(&csr_info)?;
+    Ok(pyo3::types::PyBytes::new_bound(py, &tbs_bytes).unbind())
+}
+
+#[pyo3::pyfunction]
+pub(crate) fn sign_x509_csr_raw(
+    py: pyo3::Python<'_>,
+    tbs_bytes: pyo3::Py<pyo3::types::PyBytes>,
+    private_key: &pyo3::Bound<'_, pyo3::PyAny>,
+    hash_algorithm: &pyo3::Bound<'_, pyo3::PyAny>,
+    rsa_padding: &pyo3::Bound<'_, pyo3::PyAny>,
+) -> CryptographyResult<CertificateSigningRequest> {
+    let sigalg = x509::sign::compute_signature_algorithm(
+        py,
+        private_key.clone(),
+        hash_algorithm.clone(),
+        rsa_padding.clone(),
+    )?;
+    println!("=== {:?}", sigalg);
+    let tbs_bytes = tbs_bytes.as_bytes(py);
+
+    let signature = x509::sign::sign_data(
+        py,
+        private_key.clone(),
+        hash_algorithm.clone(),
+        rsa_padding.clone(),
+        &tbs_bytes,
+    )?;
+    let csr_info: CertificationRequestInfo<'_> = asn1::parse_single(&tbs_bytes)?;
+    let data = asn1::write_single(&Csr {
+        csr_info,
+        signature_alg: sigalg,
+        signature: asn1::BitString::new(&signature, 0).unwrap(),
+    })?;
+    load_der_x509_csr(
+        py,
+        pyo3::types::PyBytes::new_bound(py, &data).clone().unbind(),
+        None,
+    )
+}
+
+#[pyo3::pyfunction]
+pub(crate) fn pack_x509(
+    py: pyo3::Python<'_>,
+    tbs_bytes: pyo3::Py<pyo3::types::PyBytes>,
+    signature: pyo3::Py<pyo3::types::PyBytes>,
+) -> CryptographyResult<CertificateSigningRequest> {
+    let sigalg = 
+    common::AlgorithmIdentifier {
+        oid: asn1::DefinedByMarker::marker(),
+        params: common::AlgorithmParameters::RsaWithSha256(Some(())),
+    };
+    // common::AlgorithmIdentifier {
+    //     oid: asn1::DefinedByMarker::marker(),
+    //     params: common::AlgorithmParameters::EcDsaWithSha3_256,
+    // };
+    let tbs_bytes = tbs_bytes.as_bytes(py);
+    let signature = signature.as_bytes(py);
+    let csr_info: CertificationRequestInfo<'_> = asn1::parse_single(tbs_bytes)?;
+    let data = asn1::write_single(&Csr {
+        csr_info,
+        signature_alg: sigalg,
+        signature: asn1::BitString::new(signature, 0).unwrap(),
+    })?;
+    load_der_x509_csr(
+        py,
+        pyo3::types::PyBytes::new_bound(py, &data).clone().unbind(),
+        None,
+    )
+}
+
+#[pyo3::pyfunction]
 pub(crate) fn create_x509_csr(
     py: pyo3::Python<'_>,
     builder: &pyo3::Bound<'_, pyo3::PyAny>,
@@ -380,6 +528,7 @@ pub(crate) fn create_x509_csr(
         rsa_padding.clone(),
         &tbs_bytes,
     )?;
+    println!("wtf");
     let data = asn1::write_single(&Csr {
         csr_info,
         signature_alg: sigalg,

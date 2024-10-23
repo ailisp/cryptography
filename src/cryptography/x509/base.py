@@ -757,6 +757,18 @@ class CertificateSigningRequestBuilder:
         return rust_x509.create_x509_csr(
             self, private_key, algorithm, rsa_padding
         )
+    
+    def build_raw(self, public_key: CertificatePublicKeyTypes) -> bytes:
+        """
+        Creates an unsigned raw CSR structure.
+
+        This method returns the raw CSR data without signing it. It's useful
+        when you need to access or manipulate the CSR data before signing.
+
+        :return: A raw CSR data structure.
+        :rtype: bytes
+        """
+        return rust_x509.create_x509_csr_raw(self, public_key)
 
 
 class CertificateBuilder:
